@@ -22,6 +22,11 @@ import math
 import numpy as np
 import torch
 
+from iquest import IQuestLoopCoderConfig, IQuestLoopCoderPreTrainedModel, IQuestLoopCoderModel, IQuestLoopCoderForCausalLM, IQuestLoopCoderCache, IQuestCoderTokenizer, IQuestCoderTokenizerFast
+
+
+
+
 if TYPE_CHECKING:
     from torch import Tensor
 
@@ -705,7 +710,7 @@ class ModelBase:
         try:
             # for security reason, we don't allow loading remote code by default
             # if a model need remote code, we will fallback to config.json
-            config = AutoConfig.from_pretrained(dir_model, trust_remote_code=False).to_dict()
+            config = AutoConfig.from_pretrained(dir_model, trust_remote_code=True).to_dict()
         except Exception as e:
             logger.warning(f"Failed to load model config from {dir_model}: {e}")
             logger.warning("Trying to load config.json instead")
@@ -1953,7 +1958,6 @@ class MmprojModel(ModelBase):
             return gguf.GGMLQuantizationType.F16 if self.ftype == gguf.LlamaFileType.MOSTLY_F16 else gguf.GGMLQuantizationType.F32
         return False
 
-
 @ModelBase.register("GPTNeoXForCausalLM")
 class GPTNeoXModel(TextModel):
     model_arch = gguf.MODEL_ARCH.GPTNEOX
@@ -2696,6 +2700,31 @@ class LlamaModel(TextModel):
                 raise ValueError(f"Unprocessed experts: {experts}")
 
 
+@ModelBase.register("IQuestLoopCoderForCausalLM")
+class IQuestLoopCoderModel(LlamaModel):
+    """IQuest Loop Coder model with recurrent loop attention mechanism."""
+    model_arch = gguf.MODEL_ARCH.LLAMA
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.loop_num = self.hparams.get('loop_num', 2)
+        self.loop_window_size = self.hparams.get('loop_window_size', 64)
+
+    def set_gguf_parameters(self):
+        super().set_gguf_parameters()
+        self.gguf_writer.add_uint32("llama.loop.num", self.loop_num)
+        self.gguf_writer.add_uint32("llama.loop.window_size", self.loop_window_size)
+
+    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None):
+        if "gate_projections" in name:
+            parts = name.split('.')
+            if len(parts) >= 4 and parts[1] == "gate_projections":
+                layer_num = parts[2]
+                param_type = parts[3]
+                new_name = f"blk.{layer_num}.loop_gate.{param_type}"
+                return [(new_name, data_torch)]
+        return super().modify_tensors(data_torch, name, bid)
+        
 @ModelBase.register("ArceeForCausalLM")
 class ArceeModel(LlamaModel):
     model_arch = gguf.MODEL_ARCH.ARCEE
